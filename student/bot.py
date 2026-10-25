@@ -10,7 +10,8 @@ class StudentBot:
 
     def __init__(self, config: BotConfig) -> None:
         self.config = config
+        self.brain = "MVP"
 
     def choose_move(self, board: chess.Board, context: SearchContext) -> chess.Move:
         time_limit_ms = allocate_time(context)
-        return find_best_move(board, time_limit_ms)
+        return find_best_move(board, time_limit_ms, self.brain)
