@@ -1,4 +1,5 @@
-"""Negamax alpha-beta search with iterative deepening.
+"""Level 2 search: MVP search plus PVS, transposition table, quiescence,
+null-move pruning, check extension and killer/history move ordering.
 
 The evaluation function must return a score in centipawns from the point of
 view of the side to move (positive = good for the side to move).
@@ -10,6 +11,7 @@ import chess
 
 from ...evaluation import evaluate_board
 
+# There is no level 2 evaluation yet, so reuse the MVP one.
 BRAIN = "MVP"
 
 MATE_SCORE = 100_000
