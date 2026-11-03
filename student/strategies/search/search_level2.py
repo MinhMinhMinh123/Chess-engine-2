@@ -24,6 +24,22 @@ MAX_PLY = 128
 CHECK_EVERY_NODES = 256
 MIN_TIME_MS = 10
 
+# The game controller declares a draw once the game reaches 300 plies.
+MAX_GAME_PLIES = 300
+
+# Time management: start no new depth after this fraction of the budget, and
+# give an unstable search (best move changed or score dropped) more time.
+NEW_DEPTH_FRACTION = 0.5
+UNSTABLE_BUDGET_FACTOR = 2
+UNSTABLE_SCORE_DROP = 50
+UNSTABLE_MIN_DEPTH = 5
+# A depth in progress is abandoned at this multiple of the budget (never past hard).
+ABORT_BUDGET_FACTOR = 1.5
+
+# Contempt: when clearly ahead, a draw counts as slightly bad for us.
+CONTEMPT_MIN_ADVANTAGE = 100
+CONTEMPT_MAX = 50
+
 TT_MAX_ENTRIES = 300_000
 NULL_MOVE_REDUCTION = 2
 RFP_MAX_DEPTH = 3
@@ -48,6 +64,7 @@ TT_MOVE_BONUS = 10_000_000
 GOOD_CAPTURE_BONUS = 1_000_000
 PROMOTION_BONUS = 900_000
 KILLER_BONUS = 800_000
+CASTLING_BONUS = 750_000
 HISTORY_MAX = 700_000
 BAD_CAPTURE_PENALTY = -1_000_000
 
@@ -136,6 +153,9 @@ def sort_moves(
             return PROMOTION_BONUS + ORDER_VALUES[move.promotion]
         if killers and move in killers:
             return KILLER_BONUS
+        # Chess960 castling is encoded as "king takes own rook", which is not a capture.
+        if board.is_castling(move):
+            return CASTLING_BONUS
         if history:
             return min(HISTORY_MAX, history.get((board.turn, move.from_square, move.to_square), 0))
         return 0
@@ -192,15 +212,25 @@ def _store_tt(key: int, depth: int, score: float, flag: int, move: chess.Move | 
 
 
 class Searcher:
-    def __init__(self, time_limit_ms: int) -> None:
+    def __init__(self, soft_ms: int, hard_ms: int | None = None) -> None:
         self.start = time.perf_counter()
-        self.time_limit_s = max(MIN_TIME_MS, int(time_limit_ms or 0)) / 1000
-        self.deadline = self.start + self.time_limit_s
+        self.soft_s = max(MIN_TIME_MS, int(soft_ms or 0)) / 1000
+        self.hard_s = max(self.soft_s, int(hard_ms or 0) / 1000)
+        # Budget for this move; raised up to hard_s when the search is unstable.
+        self.budget_s = self.soft_s
+        self.deadline = self._abort_deadline()
         self.nodes = 0
+        self.root_color = chess.WHITE
+        self.contempt = 0
+        # Root moves finished in the depth being searched, used if time runs out.
+        self.partial: list[tuple[chess.Move, float]] = []
         self.killers: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_PLY + 1)]
         self.history: dict[tuple[bool, int, int], int] = {}
         # Keys of the positions leading to the current node (None = null move barrier).
         self.keys: list[int | None] = []
+
+    def _abort_deadline(self) -> float:
+        return self.start + min(self.hard_s, ABORT_BUDGET_FACTOR * self.budget_s)
 
     def elapsed(self) -> float:
         return time.perf_counter() - self.start
@@ -212,6 +242,20 @@ class Searcher:
 
     def _evaluate(self, board: chess.Board) -> float:
         return evaluate_board(board, BRAIN)
+
+    def _draw_score(self, board: chess.Board) -> float:
+        # Seen from the side to move: a draw costs the root side `contempt`.
+        return -self.contempt if board.turn == self.root_color else self.contempt
+
+    def _rule_draw_or_mate(self, board: chess.Board, ply: int) -> float | None:
+        """Score of a game ended by the 50-move rule or the 300-ply limit.
+
+        Checkmate is checked first because it wins even on the last ply."""
+        if board.halfmove_clock >= 100 or board.ply() >= MAX_GAME_PLIES:
+            if board.is_checkmate():
+                return -MATE_SCORE + ply
+            return self._draw_score(board)
+        return None
 
     def _load_game_history(self, board: chess.Board) -> None:
         """Collect the keys of earlier positions that can still be repeated."""
@@ -244,19 +288,39 @@ class Searcher:
         entry = _tt.get(_position_key(board))
         root_moves = sort_moves(board, root_moves, entry[3] if entry else None)
         best_move = root_moves[0]
+        best_score: float | None = None
+
+        self.root_color = board.turn
+        root_eval = self._evaluate(board)
+        if root_eval >= CONTEMPT_MIN_ADVANTAGE:
+            self.contempt = min(CONTEMPT_MAX, int(root_eval) // 4)
 
         for depth in range(1, MAX_DEPTH + 1):
+            self.partial = []
             try:
                 scored = self._search_root(board, depth, root_moves)
             except SearchTimeout:
+                # The first root move is the previous best; any move that beat it
+                # was re-searched with a full window, so its score is reliable.
+                if self.partial:
+                    best_move = max(self.partial, key=lambda item: item[1])[0]
                 break
             scored.sort(key=lambda item: item[1], reverse=True)
+            previous_move, previous_score = best_move, best_score
             best_move, best_score = scored[0]
             root_moves = [move for move, _ in scored]
             if abs(best_score) >= MATE_THRESHOLD:
                 break
+
+            # Shallow depths change their mind all the time; only trust deeper ones.
+            unstable = depth >= UNSTABLE_MIN_DEPTH and previous_score is not None and (
+                best_move != previous_move or best_score < previous_score - UNSTABLE_SCORE_DROP
+            )
+            if unstable:
+                self.budget_s = min(self.hard_s, UNSTABLE_BUDGET_FACTOR * self.soft_s)
+                self.deadline = self._abort_deadline()
             # The next depth usually costs several times more than this one.
-            if self.elapsed() >= self.time_limit_s / 2:
+            if self.elapsed() >= self.budget_s * NEW_DEPTH_FRACTION:
                 break
         return best_move
 
@@ -271,6 +335,10 @@ class Searcher:
         self.keys.append(_position_key(board))
         try:
             for index, move in enumerate(root_moves):
+                # Over budget: stop between root moves and keep what was found.
+                # Only the hard limit may cut a root move in the middle.
+                if index > 0 and self.elapsed() >= self.budget_s:
+                    raise SearchTimeout
                 board.push(move)
                 try:
                     if index == 0:
@@ -283,6 +351,7 @@ class Searcher:
                 finally:
                     board.pop()
                 scored.append((move, score))
+                self.partial.append((move, score))
                 alpha = max(alpha, score)
         finally:
             self.keys.pop()
@@ -300,10 +369,14 @@ class Searcher:
         self._tick()
 
         key = _position_key(board)
-        if board.halfmove_clock >= 100 or self._is_repetition(key, board.halfmove_clock):
-            return DRAW_SCORE
+        rule_score = self._rule_draw_or_mate(board, ply)
+        if rule_score is not None:
+            return rule_score
+        # The controller adjudicates with claim_draw=True, so a repetition is a draw.
+        if self._is_repetition(key, board.halfmove_clock):
+            return self._draw_score(board)
         if chess.popcount(board.occupied) <= 4 and board.is_insufficient_material():
-            return DRAW_SCORE
+            return self._draw_score(board)
         if ply >= MAX_PLY:
             return self._evaluate(board)
 
@@ -362,7 +435,7 @@ class Searcher:
 
         moves = list(board.legal_moves)
         if not moves:
-            return -MATE_SCORE + ply if in_check else DRAW_SCORE
+            return -MATE_SCORE + ply if in_check else self._draw_score(board)
 
         killers = self.killers[ply]
         ordered = sort_moves(board, moves, tt_move, killers, self.history)
@@ -433,6 +506,9 @@ class Searcher:
 
         if ply >= MAX_PLY:
             return self._evaluate(board)
+        rule_score = self._rule_draw_or_mate(board, ply)
+        if rule_score is not None:
+            return rule_score
 
         in_check = board.is_check()
         if in_check:
@@ -482,12 +558,12 @@ class Searcher:
         return best_score
 
 
-def find_best_move(board: chess.Board, time_limit_ms: int) -> chess.Move:
-    """Return the best move found within ``time_limit_ms`` milliseconds.
+def find_best_move(board: chess.Board, soft_ms: int, hard_ms: int | None = None) -> chess.Move:
+    """Return the best move found, aiming for ``soft_ms`` and never past ``hard_ms``.
 
     The search runs on a copy, so ``board`` is never modified. If time runs out,
-    the best move of the last fully searched depth is returned.
+    the best move of the last searched depth (completed or partial) is returned.
     """
     if not any(board.legal_moves):
         raise ValueError("No legal moves in this position")
-    return Searcher(time_limit_ms).search(board.copy())
+    return Searcher(soft_ms, hard_ms).search(board.copy())
