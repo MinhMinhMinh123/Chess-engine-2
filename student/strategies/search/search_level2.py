@@ -1,5 +1,6 @@
 """Level 2 search: MVP search plus PVS, transposition table, quiescence,
-null-move pruning, check extension and killer/history move ordering.
+null-move pruning, late move reduction, reverse futility pruning, SEE,
+check extension and killer/history move ordering.
 
 The evaluation function must return a score in centipawns from the point of
 view of the side to move (positive = good for the side to move).
@@ -11,8 +12,7 @@ import chess
 
 from ...evaluation import evaluate_board
 
-# There is no level 2 evaluation yet, so reuse the MVP one.
-BRAIN = "MVP"
+BRAIN = "v2"
 
 MATE_SCORE = 100_000
 MATE_THRESHOLD = MATE_SCORE - 1_000
@@ -21,14 +21,36 @@ INFINITY = MATE_SCORE + 1
 
 MAX_DEPTH = 64
 MAX_PLY = 128
-CHECK_EVERY_NODES = 128
+CHECK_EVERY_NODES = 256
 MIN_TIME_MS = 10
-TT_MAX_ENTRIES = 1_000_000
+
+# The game controller declares a draw once the game reaches 300 plies.
+MAX_GAME_PLIES = 300
+
+# Time management: start no new depth after this fraction of the budget, and
+# give an unstable search (best move changed or score dropped) more time.
+NEW_DEPTH_FRACTION = 0.5
+UNSTABLE_BUDGET_FACTOR = 2
+UNSTABLE_SCORE_DROP = 50
+UNSTABLE_MIN_DEPTH = 5
+# A depth in progress is abandoned at this multiple of the budget (never past hard).
+ABORT_BUDGET_FACTOR = 1.5
+
+# Contempt: when clearly ahead, a draw counts as slightly bad for us.
+CONTEMPT_MIN_ADVANTAGE = 100
+CONTEMPT_MAX = 50
+
+TT_MAX_ENTRIES = 300_000
 NULL_MOVE_REDUCTION = 2
+RFP_MAX_DEPTH = 3
+RFP_MARGIN = 120
+LMR_MIN_DEPTH = 3
+LMR_MIN_MOVE_INDEX = 3
+DELTA_MARGIN = 200
 
 EXACT, LOWER_BOUND, UPPER_BOUND = 0, 1, 2
 
-# Only used for move ordering (MVV-LVA), not for evaluation.
+# Only used for move ordering, SEE and delta pruning, not for evaluation.
 ORDER_VALUES = {
     chess.PAWN: 100,
     chess.KNIGHT: 320,
@@ -39,13 +61,72 @@ ORDER_VALUES = {
 }
 
 TT_MOVE_BONUS = 10_000_000
-CAPTURE_BONUS = 1_000_000
+GOOD_CAPTURE_BONUS = 1_000_000
 PROMOTION_BONUS = 900_000
 KILLER_BONUS = 800_000
+CASTLING_BONUS = 750_000
+HISTORY_MAX = 700_000
+BAD_CAPTURE_PENALTY = -1_000_000
+
+# Kept between moves of the same game: key -> (depth, score, flag, move, generation).
+_tt: dict[int, tuple[int, float, int, chess.Move | None, int]] = {}
+_generation = 0
 
 
 class SearchTimeout(Exception):
     pass
+
+
+def _victim_type(board: chess.Board, move: chess.Move) -> chess.PieceType:
+    if board.is_en_passant(move):
+        return chess.PAWN
+    return board.piece_type_at(move.to_square) or chess.PAWN
+
+
+def _mvv_lva(board: chess.Board, move: chess.Move) -> int:
+    attacker = board.piece_type_at(move.from_square) or chess.PAWN
+    return 10 * ORDER_VALUES[_victim_type(board, move)] - ORDER_VALUES[attacker]
+
+
+def see(board: chess.Board, move: chess.Move) -> int:
+    """Static exchange evaluation: material won by ``move`` if both sides keep
+    recapturing on the target square with their least valuable attacker."""
+    to_square = move.to_square
+    occupied = board.occupied ^ chess.BB_SQUARES[move.from_square]
+    if board.is_en_passant(move):
+        occupied ^= chess.BB_SQUARES[to_square + (-8 if board.turn == chess.WHITE else 8)]
+        gains = [ORDER_VALUES[chess.PAWN]]
+    else:
+        victim = board.piece_type_at(to_square)
+        gains = [ORDER_VALUES[victim] if victim else 0]
+
+    on_square = board.piece_type_at(move.from_square) or chess.PAWN
+    if move.promotion:
+        gains[0] += ORDER_VALUES[move.promotion] - ORDER_VALUES[chess.PAWN]
+        on_square = move.promotion
+
+    side = not board.turn
+    while True:
+        attackers = board.attackers_mask(side, to_square, occupied) & occupied
+        if not attackers:
+            break
+        for piece_type in (chess.PAWN, chess.KNIGHT, chess.BISHOP, chess.ROOK, chess.QUEEN, chess.KING):
+            candidates = attackers & board.pieces_mask(piece_type, side)
+            if candidates:
+                break
+        square = chess.lsb(candidates)
+        if piece_type == chess.KING:
+            # The king may only recapture if the square is no longer defended.
+            if board.attackers_mask(not side, to_square, occupied ^ chess.BB_SQUARES[square]) & occupied:
+                break
+        gains.append(ORDER_VALUES[on_square] - gains[-1])
+        on_square = piece_type
+        occupied ^= chess.BB_SQUARES[square]
+        side = not side
+
+    for index in range(len(gains) - 1, 0, -1):
+        gains[index - 1] = -max(-gains[index - 1], gains[index])
+    return gains[0]
 
 
 def sort_moves(
@@ -55,24 +136,28 @@ def sort_moves(
     killers: list[chess.Move | None] | None = None,
     history: dict[tuple[bool, int, int], int] | None = None,
 ) -> list[chess.Move]:
-    """Order moves: TT move, captures (MVV-LVA), promotions, killers, history."""
+    """Order moves: TT move, winning/equal captures (MVV-LVA), promotions,
+    killers, history, and losing captures (negative SEE) last."""
 
     def score(move: chess.Move) -> int:
         if move == tt_move:
             return TT_MOVE_BONUS
         if board.is_capture(move):
-            if board.is_en_passant(move):
-                victim = chess.PAWN
-            else:
-                victim = board.piece_type_at(move.to_square) or chess.PAWN
             attacker = board.piece_type_at(move.from_square) or chess.PAWN
-            return CAPTURE_BONUS + 10 * ORDER_VALUES[victim] - ORDER_VALUES[attacker]
+            victim = _victim_type(board, move)
+            # A capture of an equal or bigger piece can never lose material.
+            if ORDER_VALUES[attacker] > ORDER_VALUES[victim] and see(board, move) < 0:
+                return BAD_CAPTURE_PENALTY + _mvv_lva(board, move)
+            return GOOD_CAPTURE_BONUS + _mvv_lva(board, move)
         if move.promotion:
             return PROMOTION_BONUS + ORDER_VALUES[move.promotion]
         if killers and move in killers:
             return KILLER_BONUS
+        # Chess960 castling is encoded as "king takes own rook", which is not a capture.
+        if board.is_castling(move):
+            return CASTLING_BONUS
         if history:
-            return history.get((board.turn, move.from_square, move.to_square), 0)
+            return min(HISTORY_MAX, history.get((board.turn, move.from_square, move.to_square), 0))
         return 0
 
     return sorted(moves, key=score, reverse=True)
@@ -101,15 +186,51 @@ def _has_non_pawn_material(board: chess.Board) -> bool:
     return bool(us & pieces)
 
 
+def _position_key(board: chess.Board) -> int:
+    return hash(board._transposition_key())
+
+
+def _make_room_in_tt() -> None:
+    """Drop entries from earlier moves first, then shallow ones, then everything."""
+    global _tt
+    _tt = {key: entry for key, entry in _tt.items() if entry[4] == _generation}
+    if len(_tt) >= TT_MAX_ENTRIES:
+        _tt = {key: entry for key, entry in _tt.items() if entry[0] > 1}
+    if len(_tt) >= TT_MAX_ENTRIES:
+        _tt.clear()
+
+
+def _store_tt(key: int, depth: int, score: float, flag: int, move: chess.Move | None) -> None:
+    old = _tt.get(key)
+    if old is None:
+        if len(_tt) >= TT_MAX_ENTRIES:
+            _make_room_in_tt()
+    elif old[4] == _generation and depth < old[0] and flag != EXACT:
+        # Keep the deeper entry of this move; a stale or shallower one is replaced.
+        return
+    _tt[key] = (depth, score, flag, move, _generation)
+
+
 class Searcher:
-    def __init__(self, time_limit_ms: int) -> None:
+    def __init__(self, soft_ms: int, hard_ms: int | None = None) -> None:
         self.start = time.perf_counter()
-        self.time_limit_s = max(MIN_TIME_MS, int(time_limit_ms or 0)) / 1000
-        self.deadline = self.start + self.time_limit_s
+        self.soft_s = max(MIN_TIME_MS, int(soft_ms or 0)) / 1000
+        self.hard_s = max(self.soft_s, int(hard_ms or 0) / 1000)
+        # Budget for this move; raised up to hard_s when the search is unstable.
+        self.budget_s = self.soft_s
+        self.deadline = self._abort_deadline()
         self.nodes = 0
-        self.tt: dict[object, tuple[int, float, int, chess.Move | None]] = {}
+        self.root_color = chess.WHITE
+        self.contempt = 0
+        # Root moves finished in the depth being searched, used if time runs out.
+        self.partial: list[tuple[chess.Move, float]] = []
         self.killers: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_PLY + 1)]
         self.history: dict[tuple[bool, int, int], int] = {}
+        # Keys of the positions leading to the current node (None = null move barrier).
+        self.keys: list[int | None] = []
+
+    def _abort_deadline(self) -> float:
+        return self.start + min(self.hard_s, ABORT_BUDGET_FACTOR * self.budget_s)
 
     def elapsed(self) -> float:
         return time.perf_counter() - self.start
@@ -122,24 +243,84 @@ class Searcher:
     def _evaluate(self, board: chess.Board) -> float:
         return evaluate_board(board, BRAIN)
 
+    def _draw_score(self, board: chess.Board) -> float:
+        # Seen from the side to move: a draw costs the root side `contempt`.
+        return -self.contempt if board.turn == self.root_color else self.contempt
+
+    def _rule_draw_or_mate(self, board: chess.Board, ply: int) -> float | None:
+        """Score of a game ended by the 50-move rule or the 300-ply limit.
+
+        Checkmate is checked first because it wins even on the last ply."""
+        if board.halfmove_clock >= 100 or board.ply() >= MAX_GAME_PLIES:
+            if board.is_checkmate():
+                return -MATE_SCORE + ply
+            return self._draw_score(board)
+        return None
+
+    def _load_game_history(self, board: chess.Board) -> None:
+        """Collect the keys of earlier positions that can still be repeated."""
+        history = board.copy()
+        keys: list[int] = []
+        while history.move_stack and len(keys) < board.halfmove_clock:
+            history.pop()
+            keys.append(_position_key(history))
+        self.keys = list(reversed(keys))
+
+    def _is_repetition(self, key: int, halfmove_clock: int) -> bool:
+        # Only positions with the same side to move and no irreversible move since.
+        oldest = max(0, len(self.keys) - halfmove_clock)
+        for index in range(len(self.keys) - 1, oldest - 1, -1):
+            previous = self.keys[index]
+            if previous is None:
+                return False
+            if (len(self.keys) - index) % 2 == 0 and previous == key:
+                return True
+        return False
+
     def search(self, board: chess.Board) -> chess.Move:
-        root_moves = sort_moves(board, list(board.legal_moves))
-        best_move = root_moves[0]
+        global _generation
+        _generation += 1
+        self._load_game_history(board)
+
+        root_moves = list(board.legal_moves)
         if len(root_moves) == 1:
-            return best_move
+            return root_moves[0]
+        entry = _tt.get(_position_key(board))
+        root_moves = sort_moves(board, root_moves, entry[3] if entry else None)
+        best_move = root_moves[0]
+        best_score: float | None = None
+
+        self.root_color = board.turn
+        root_eval = self._evaluate(board)
+        if root_eval >= CONTEMPT_MIN_ADVANTAGE:
+            self.contempt = min(CONTEMPT_MAX, int(root_eval) // 4)
 
         for depth in range(1, MAX_DEPTH + 1):
+            self.partial = []
             try:
                 scored = self._search_root(board, depth, root_moves)
             except SearchTimeout:
+                # The first root move is the previous best; any move that beat it
+                # was re-searched with a full window, so its score is reliable.
+                if self.partial:
+                    best_move = max(self.partial, key=lambda item: item[1])[0]
                 break
             scored.sort(key=lambda item: item[1], reverse=True)
+            previous_move, previous_score = best_move, best_score
             best_move, best_score = scored[0]
             root_moves = [move for move, _ in scored]
             if abs(best_score) >= MATE_THRESHOLD:
                 break
+
+            # Shallow depths change their mind all the time; only trust deeper ones.
+            unstable = depth >= UNSTABLE_MIN_DEPTH and previous_score is not None and (
+                best_move != previous_move or best_score < previous_score - UNSTABLE_SCORE_DROP
+            )
+            if unstable:
+                self.budget_s = min(self.hard_s, UNSTABLE_BUDGET_FACTOR * self.soft_s)
+                self.deadline = self._abort_deadline()
             # The next depth usually costs several times more than this one.
-            if self.elapsed() >= self.time_limit_s / 2:
+            if self.elapsed() >= self.budget_s * NEW_DEPTH_FRACTION:
                 break
         return best_move
 
@@ -151,20 +332,29 @@ class Searcher:
     ) -> list[tuple[chess.Move, float]]:
         alpha = -INFINITY
         scored: list[tuple[chess.Move, float]] = []
-        for index, move in enumerate(root_moves):
-            board.push(move)
-            try:
-                if index == 0:
-                    score = -self._negamax(board, depth - 1, -INFINITY, -alpha, 1)
-                else:
-                    # Principal variation search: try a null window first.
-                    score = -self._negamax(board, depth - 1, -alpha - 1, -alpha, 1)
-                    if score > alpha:
+        self.keys.append(_position_key(board))
+        try:
+            for index, move in enumerate(root_moves):
+                # Over budget: stop between root moves and keep what was found.
+                # Only the hard limit may cut a root move in the middle.
+                if index > 0 and self.elapsed() >= self.budget_s:
+                    raise SearchTimeout
+                board.push(move)
+                try:
+                    if index == 0:
                         score = -self._negamax(board, depth - 1, -INFINITY, -alpha, 1)
-            finally:
-                board.pop()
-            scored.append((move, score))
-            alpha = max(alpha, score)
+                    else:
+                        # Principal variation search: try a null window first.
+                        score = -self._negamax(board, depth - 1, -alpha - 1, -alpha, 1)
+                        if score > alpha:
+                            score = -self._negamax(board, depth - 1, -INFINITY, -alpha, 1)
+                finally:
+                    board.pop()
+                scored.append((move, score))
+                self.partial.append((move, score))
+                alpha = max(alpha, score)
+        finally:
+            self.keys.pop()
         return scored
 
     def _negamax(
@@ -178,10 +368,15 @@ class Searcher:
     ) -> float:
         self._tick()
 
-        if board.halfmove_clock >= 100 or board.is_insufficient_material():
-            return DRAW_SCORE
-        if board.is_repetition(2):
-            return DRAW_SCORE
+        key = _position_key(board)
+        rule_score = self._rule_draw_or_mate(board, ply)
+        if rule_score is not None:
+            return rule_score
+        # The controller adjudicates with claim_draw=True, so a repetition is a draw.
+        if self._is_repetition(key, board.halfmove_clock):
+            return self._draw_score(board)
+        if chess.popcount(board.occupied) <= 4 and board.is_insufficient_material():
+            return self._draw_score(board)
         if ply >= MAX_PLY:
             return self._evaluate(board)
 
@@ -197,11 +392,10 @@ class Searcher:
         if depth <= 0:
             return self._quiescence(board, alpha, beta, ply)
 
-        key = board._transposition_key()
         tt_move: chess.Move | None = None
-        entry = self.tt.get(key)
+        entry = _tt.get(key)
         if entry is not None:
-            entry_depth, entry_score, entry_flag, tt_move = entry
+            entry_depth, entry_score, entry_flag, tt_move, _ = entry
             if entry_depth >= depth:
                 score = _score_from_tt(entry_score, ply)
                 if entry_flag == EXACT:
@@ -212,27 +406,36 @@ class Searcher:
                     return score
 
         is_pv = beta - alpha > 1
-        if (
-            allow_null
-            and not is_pv
-            and not in_check
-            and depth >= 3
-            and abs(beta) < MATE_THRESHOLD
-            and _has_non_pawn_material(board)
-        ):
-            board.push(chess.Move.null())
-            try:
-                score = -self._negamax(
-                    board, depth - 1 - NULL_MOVE_REDUCTION, -beta, -beta + 1, ply + 1, False
-                )
-            finally:
-                board.pop()
-            if score >= beta:
-                return beta
+        can_prune = not is_pv and not in_check and abs(beta) < MATE_THRESHOLD
+        static_eval: float | None = None
+
+        # Reverse futility pruning: far above beta near the leaves, assume a cutoff.
+        if can_prune and depth <= RFP_MAX_DEPTH:
+            static_eval = self._evaluate(board)
+            if static_eval - RFP_MARGIN * depth >= beta:
+                return static_eval
+
+        # Null move pruning. Skipped when the side to move has only king and pawns,
+        # because zugzwang is common there and passing would be a lie.
+        if allow_null and can_prune and depth >= 3 and _has_non_pawn_material(board):
+            if static_eval is None:
+                static_eval = self._evaluate(board)
+            if static_eval >= beta:
+                board.push(chess.Move.null())
+                self.keys.append(None)
+                try:
+                    score = -self._negamax(
+                        board, depth - 1 - NULL_MOVE_REDUCTION, -beta, -beta + 1, ply + 1, False
+                    )
+                finally:
+                    self.keys.pop()
+                    board.pop()
+                if score >= beta:
+                    return beta
 
         moves = list(board.legal_moves)
         if not moves:
-            return -MATE_SCORE + ply if in_check else DRAW_SCORE
+            return -MATE_SCORE + ply if in_check else self._draw_score(board)
 
         killers = self.killers[ply]
         ordered = sort_moves(board, moves, tt_move, killers, self.history)
@@ -240,32 +443,53 @@ class Searcher:
         alpha_orig = alpha
         best_score = -INFINITY
         best_move: chess.Move | None = None
-        for index, move in enumerate(ordered):
-            is_quiet = not board.is_capture(move) and not move.promotion
-            board.push(move)
-            try:
-                if index == 0:
-                    score = -self._negamax(board, depth - 1, -beta, -alpha, ply + 1)
-                else:
-                    score = -self._negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1)
-                    if alpha < score < beta:
+        self.keys.append(key)
+        try:
+            for index, move in enumerate(ordered):
+                is_quiet = not board.is_capture(move) and not move.promotion
+                board.push(move)
+                try:
+                    if index == 0:
                         score = -self._negamax(board, depth - 1, -beta, -alpha, ply + 1)
-            finally:
-                board.pop()
+                    else:
+                        # Late move reduction: quiet moves ordered late are rarely best,
+                        # so search them shallower first and re-search if they surprise.
+                        reduction = 0
+                        if (
+                            depth >= LMR_MIN_DEPTH
+                            and index >= LMR_MIN_MOVE_INDEX
+                            and is_quiet
+                            and not in_check
+                            and move not in killers
+                            and not board.is_check()
+                        ):
+                            reduction = 1 if index < 6 else 2
+                            reduction = min(reduction, depth - 2)
+                        score = -self._negamax(
+                            board, depth - 1 - reduction, -alpha - 1, -alpha, ply + 1
+                        )
+                        if reduction and score > alpha:
+                            score = -self._negamax(board, depth - 1, -alpha - 1, -alpha, ply + 1)
+                        if alpha < score < beta:
+                            score = -self._negamax(board, depth - 1, -beta, -alpha, ply + 1)
+                finally:
+                    board.pop()
 
-            if score > best_score:
-                best_score = score
-                best_move = move
-            if score > alpha:
-                alpha = score
-            if alpha >= beta:
-                if is_quiet:
-                    if killers[0] != move:
-                        killers[1] = killers[0]
-                        killers[0] = move
-                    history_key = (board.turn, move.from_square, move.to_square)
-                    self.history[history_key] = self.history.get(history_key, 0) + depth * depth
-                break
+                if score > best_score:
+                    best_score = score
+                    best_move = move
+                if score > alpha:
+                    alpha = score
+                if alpha >= beta:
+                    if is_quiet:
+                        if killers[0] != move:
+                            killers[1] = killers[0]
+                            killers[0] = move
+                        history_key = (board.turn, move.from_square, move.to_square)
+                        self.history[history_key] = self.history.get(history_key, 0) + depth * depth
+                    break
+        finally:
+            self.keys.pop()
 
         if best_score <= alpha_orig:
             flag = UPPER_BOUND
@@ -273,9 +497,7 @@ class Searcher:
             flag = LOWER_BOUND
         else:
             flag = EXACT
-        if len(self.tt) >= TT_MAX_ENTRIES:
-            self.tt.clear()
-        self.tt[key] = (depth, _score_to_tt(best_score, ply), flag, best_move)
+        _store_tt(key, depth, _score_to_tt(best_score, ply), flag, best_move)
         return best_score
 
     def _quiescence(self, board: chess.Board, alpha: float, beta: float, ply: int) -> float:
@@ -284,12 +506,16 @@ class Searcher:
 
         if ply >= MAX_PLY:
             return self._evaluate(board)
+        rule_score = self._rule_draw_or_mate(board, ply)
+        if rule_score is not None:
+            return rule_score
 
         in_check = board.is_check()
         if in_check:
             moves = list(board.legal_moves)
             if not moves:
                 return -MATE_SCORE + ply
+            moves = sort_moves(board, moves)
             best_score = -INFINITY
         else:
             stand_pat = self._evaluate(board)
@@ -297,13 +523,27 @@ class Searcher:
                 return stand_pat
             alpha = max(alpha, stand_pat)
             best_score = stand_pat
-            moves = [
-                move
-                for move in board.legal_moves
-                if board.is_capture(move) or move.promotion == chess.QUEEN
-            ]
+            moves = []
+            for move in board.legal_moves:
+                if move.promotion == chess.QUEEN:
+                    moves.append(move)
+                    continue
+                if not board.is_capture(move):
+                    continue
+                # Delta pruning: even winning the victim for free cannot reach alpha.
+                victim_value = ORDER_VALUES[_victim_type(board, move)]
+                if stand_pat + victim_value + DELTA_MARGIN <= alpha:
+                    continue
+                # Skip captures that lose material in the exchange.
+                if see(board, move) < 0:
+                    continue
+                moves.append(move)
+            moves.sort(
+                key=lambda move: _mvv_lva(board, move) if board.is_capture(move) else 0,
+                reverse=True,
+            )
 
-        for move in sort_moves(board, moves):
+        for move in moves:
             board.push(move)
             try:
                 score = -self._quiescence(board, -beta, -alpha, ply + 1)
@@ -318,12 +558,12 @@ class Searcher:
         return best_score
 
 
-def find_best_move(board: chess.Board, time_limit_ms: int) -> chess.Move:
-    """Return the best move found within ``time_limit_ms`` milliseconds.
+def find_best_move(board: chess.Board, soft_ms: int, hard_ms: int | None = None) -> chess.Move:
+    """Return the best move found, aiming for ``soft_ms`` and never past ``hard_ms``.
 
     The search runs on a copy, so ``board`` is never modified. If time runs out,
-    the best move of the last fully searched depth is returned.
+    the best move of the last searched depth (completed or partial) is returned.
     """
     if not any(board.legal_moves):
         raise ValueError("No legal moves in this position")
-    return Searcher(time_limit_ms).search(board.copy())
+    return Searcher(soft_ms, hard_ms).search(board.copy())
