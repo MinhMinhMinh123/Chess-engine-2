@@ -69,4 +69,4 @@ def allocate_time(context: SearchContext) -> int:
     trả về soft.
     """
     soft, _hard = allocate_time_window(context)
-    return soft
+    return soft, hard
