@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Chessboard } from "react-chessboard";
 import "./styles.css";
@@ -255,6 +255,40 @@ function App() {
     }
   }
 
+  const downloadPgn = useCallback(async () => {
+    setError("");
+    try {
+      const response = await fetch("/api/pgn");
+      if (!response.ok) throw new Error("Không thể tải PGN");
+      const url = URL.createObjectURL(await response.blob());
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `chesslab-${game.chess960_id}.pgn`;
+      document.body.append(link);
+      link.click();
+      link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    }
+  }, [game.chess960_id]);
+
+  useEffect(() => {
+    function handleDownloadShortcut(event: KeyboardEvent) {
+      if (
+        event.ctrlKey &&
+        event.key.toLowerCase() === "z" &&
+        game.history.length > 0
+      ) {
+        event.preventDefault();
+        void downloadPgn();
+      }
+    }
+
+    window.addEventListener("keydown", handleDownloadShortcut);
+    return () => window.removeEventListener("keydown", handleDownloadShortcut);
+  }, [downloadPgn, game.history.length]);
+
   const stationaryCastles = game.legal_moves.filter(
     (move) => move.castling && move.from === move.to,
   );
@@ -369,7 +403,12 @@ function App() {
           )}
 
           <div className="panel moves">
-            <h2>Lịch sử nước đi</h2>
+            <div className="moves-heading">
+              <h2>Lịch sử nước đi</h2>
+              <span className="moves-shortcut">
+                {game.history.length > 0 ? "Ctrl + Z · Tải PGN" : "Ctrl + Z"}
+              </span>
+            </div>
             {game.history.length > 0 ? (
               <ol>{game.history.map((move) => <li key={move.ply}>{move.san}</li>)}</ol>
             ) : (

@@ -7,6 +7,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 import chess
+import chess.pgn
 
 from .bot_process import BotProcess, BotProcessError
 from .chess960_rules import display_legal_moves, move_for_token, new_board
@@ -243,3 +244,13 @@ class GameController:
             "history": self.history,
             "legal_moves": display_legal_moves(self.board) if human_turn else [],
         }
+
+    def pgn(self) -> str:
+        game = chess.pgn.Game.from_board(self.board.copy(stack=True))
+        game.headers["Event"] = "ChessLab local game"
+        game.headers["White"] = "Bot" if self.bot_color == chess.WHITE else "Human"
+        game.headers["Black"] = "Bot" if self.bot_color == chess.BLACK else "Human"
+        game.headers["Result"] = self.result or "*"
+        return game.accept(
+            chess.pgn.StringExporter(headers=True, variations=False, comments=False)
+        )

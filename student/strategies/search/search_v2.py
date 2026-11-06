@@ -11,9 +11,6 @@ import chess
 
 from ...evaluation import evaluate_board
 
-# There is no level 2 evaluation yet, so reuse the MVP one.
-BRAIN = "MVP"
-
 MATE_SCORE = 100_000
 MATE_THRESHOLD = MATE_SCORE - 1_000
 DRAW_SCORE = 0
@@ -102,11 +99,12 @@ def _has_non_pawn_material(board: chess.Board) -> bool:
 
 
 class Searcher:
-    def __init__(self, time_limit_ms: int) -> None:
+    def __init__(self, time_limit_ms: int, eval_brain: str) -> None:
         self.start = time.perf_counter()
         self.time_limit_s = max(MIN_TIME_MS, int(time_limit_ms or 0)) / 1000
         self.deadline = self.start + self.time_limit_s
         self.nodes = 0
+        self.eval_brain = eval_brain
         self.tt: dict[object, tuple[int, float, int, chess.Move | None]] = {}
         self.killers: list[list[chess.Move | None]] = [[None, None] for _ in range(MAX_PLY + 1)]
         self.history: dict[tuple[bool, int, int], int] = {}
@@ -120,7 +118,7 @@ class Searcher:
             raise SearchTimeout
 
     def _evaluate(self, board: chess.Board) -> float:
-        return evaluate_board(board, BRAIN)
+        return evaluate_board(board, self.eval_brain)
 
     def search(self, board: chess.Board) -> chess.Move:
         root_moves = sort_moves(board, list(board.legal_moves))
@@ -318,7 +316,11 @@ class Searcher:
         return best_score
 
 
-def find_best_move(board: chess.Board, time_limit_ms: int) -> chess.Move:
+def find_best_move(
+    board: chess.Board,
+    time_limit_ms: int,
+    eval_brain: str = "MVP",
+) -> chess.Move:
     """Return the best move found within ``time_limit_ms`` milliseconds.
 
     The search runs on a copy, so ``board`` is never modified. If time runs out,
@@ -326,4 +328,4 @@ def find_best_move(board: chess.Board, time_limit_ms: int) -> chess.Move:
     """
     if not any(board.legal_moves):
         raise ValueError("No legal moves in this position")
-    return Searcher(time_limit_ms).search(board.copy())
+    return Searcher(time_limit_ms, eval_brain).search(board.copy())

@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, PlainTextResponse
 from fastapi.staticfiles import StaticFiles
 
 from .chess960_rules import new_board
@@ -43,6 +43,11 @@ app = FastAPI(title="ChessLab", lifespan=lifespan)
 @app.get("/api/state")
 async def get_state() -> dict[str, Any]:
     return game.state()
+
+
+@app.get("/api/pgn")
+async def get_pgn() -> PlainTextResponse:
+    return PlainTextResponse(game.pgn(), media_type="application/x-chess-pgn")
 
 
 @app.get("/api/preview/{position_id}")
