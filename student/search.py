@@ -1,15 +1,17 @@
 import chess
 
-from .strategies.search import search_level2, search_MVP
+from .strategies.search import search_MVP, search_v2
 
 
 def find_best_move(
     board: chess.Board,
     time_limit_ms: int,
-    brain: str,
+    brain: dict[str, str],
 ) -> chess.Move:
-    if brain == "MVP":
-        return search_MVP.find_best_move(board, time_limit_ms)
-    if brain == "level2":
-        return search_level2.find_best_move(board, time_limit_ms)
-    raise ValueError(f"Unknown search brain: {brain}")
+    search_brain = brain["search"]
+    eval_brain = brain["eval"]
+    if search_brain == "MVP":
+        return search_MVP.find_best_move(board, time_limit_ms, eval_brain)
+    if search_brain == "level2":
+        return search_v2.find_best_move(board, time_limit_ms, eval_brain)
+    raise ValueError(f"Unknown search brain: {search_brain}")
