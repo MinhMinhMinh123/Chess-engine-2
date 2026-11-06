@@ -8,7 +8,7 @@ from .time_manager import allocate_time
 class StudentBot:
     """The only class imported by the local runner and official grader."""
 
-    def __init__(self, config: BotConfig, brain = {"eval": "MVP", "search": "MVP"}) -> None:
+    def __init__(self, config: BotConfig, brain = {"eval": "v3", "search": "v2"}) -> None:
         self.config = config
         self.brain = brain
 

@@ -143,6 +143,9 @@ button.shuffle { padding: 7px 10px; border-color: #59634c; background: #32372e; 
   color: #fff3ce;
 }
 .promotion h2 { color: #effff2; }
+.moves-heading { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.moves-heading h2 { margin-bottom: 12px; }
+.moves-shortcut { color: #b9cf7d; font-size: .75rem; white-space: nowrap; }
 .promotion button {
   border-color: #b7eec5;
   background: #e0fce7;

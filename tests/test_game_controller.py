@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import asyncio
+import io
 from typing import Any
 
 import chess
+import chess.pgn
 import pytest
 
 from app.game_controller import GameController
@@ -63,3 +65,28 @@ def test_invalid_human_move_does_not_stop_the_clock() -> None:
         await controller.close()
 
     asyncio.run(scenario())
+
+
+def test_pgn_exports_chess960_setup_and_game_result() -> None:
+    async def broadcast(_: dict[str, Any]) -> None:
+        return None
+
+    controller = GameController(broadcast)
+    controller.position_id = 0
+    controller.board = chess.Board.from_chess960_pos(0)
+    controller.bot_color = chess.BLACK
+    move = next(iter(controller.board.legal_moves))
+    controller.board.push(move)
+    controller.result = "1-0"
+
+    pgn = controller.pgn()
+    game = chess.pgn.read_game(io.StringIO(pgn))
+
+    assert game is not None
+    assert game.headers["Variant"] == "Chess960"
+    assert game.headers["Result"] == "1-0"
+    assert game.board().chess960
+    assert game.board().fen(shredder=True) == chess.Board.from_chess960_pos(0).fen(
+        shredder=True
+    )
+    assert list(game.mainline_moves()) == [move]
