@@ -42,7 +42,7 @@ def _mop_up_eval(winning_king: int, losing_king: int) -> int:
     return center_dist * 15 + (7 - kings_dist) * 10
 
 
-def evaluate_board(board: chess.Board) -> float:
+def evaluate_board(board: chess.Board) -> int:
     """Lượng giá thế cờ toàn diện v3:
     - Tapered + PST thủ công
     - Bitboard Cached Pawn Structure (Tốt thông, chồng, cô lập, liên kết)
@@ -50,11 +50,11 @@ def evaluate_board(board: chess.Board) -> float:
     - Lá chắn Tốt bảo vệ Vua sau khi nhập thành
     - Đặc thù khai cuộc Chess960 (Nhập thành, phát triển quân nhẹ, tránh xuất Hậu sớm)
     - Mop-up tàn cuộc và nhận diện hòa lý thuyết
-    - Chuẩn Negamax
+    - Chuẩn Negamax (trả về số nguyên int cho cửa sổ hẹp PVS)
     """
     # 1. NHẬN DIỆN HÒA LÝ THUYẾT (Thiếu quân chiếu hết: K vs K, K+N vs K, K+B vs K)
     if board.is_insufficient_material():
-        return 0.0
+        return 0
 
     mg_white, mg_black = 0, 0
     eg_white, eg_black = 0, 0
@@ -204,8 +204,8 @@ def evaluate_board(board: chess.Board) -> float:
         elif eg_score <= -200:
             eg_score -= _mop_up_eval(winning_king=king_black, losing_king=king_white)
 
-    # 8. NỘI SUY TAPERED THEO GIAI ĐOẠN VÁN CỜ
-    total_score = (mg_score * phase + eg_score * (TOTAL_PHASE - phase)) / TOTAL_PHASE
+    # 8. NỘI SUY TAPERED THEO GIAI ĐOẠN VÁN CỜ (CHIA SỐ NGUYÊN //)
+    total_score = (mg_score * phase + eg_score * (TOTAL_PHASE - phase)) // TOTAL_PHASE
 
-    # 9. CHUẨN NEGAMAX
-    return total_score if board.turn == chess.WHITE else -total_score
+    # 9. CHUẨN NEGAMAX (SỐ NGUYÊN INT)
+    return int(total_score) if board.turn == chess.WHITE else int(-total_score)
