@@ -1,6 +1,11 @@
 {
   "protocol_version": "1.0",
-  "team_id": "TODO",
-  "display_name": "TODO",
-  "members": []
+  "team_id": "nhom-08",
+  "display_name": "Nhóm 8",
+  "members": [
+    "MSSV - Nguyễn Ngọc Phúc",
+    "MSSV - Nguyễn Tiến Minh",
+    "MSSV - Họ và tên (NguyenDucQuan)",
+    "MSSV - Họ và tên (MinhMinhMinh123)"
+  ]
 }
