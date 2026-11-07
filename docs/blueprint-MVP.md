@@ -4,7 +4,7 @@
 
 | Việc | Cách làm |
 | --- | --- |
-| Khởi tạo | Lưu `config`, tạo `random.Random(config.seed)` và một `Searcher` |
+| Khởi tạo |
 | Bảo vệ bàn cờ gốc | Search trên `board.copy()`, nên dù search bị cắt ngang bàn gốc vẫn đúng |
 | Không bao giờ crash | Bọc toàn bộ trong `try/except`, lỗi thì trả nước hợp lệ đầu tiên |
 | Kiểm tra cuối | Chỉ trả nước nếu nó thuộc `board.legal_moves` |

@@ -12,8 +12,6 @@ import chess
 
 from ...evaluation import evaluate_board
 
-BRAIN = "v2"
-
 MATE_SCORE = 100_000
 MATE_THRESHOLD = MATE_SCORE - 1_000
 DRAW_SCORE = 0
@@ -212,7 +210,7 @@ def _store_tt(key: int, depth: int, score: float, flag: int, move: chess.Move | 
 
 
 class Searcher:
-    def __init__(self, soft_ms: int, hard_ms: int | None = None) -> None:
+    def __init__(self, soft_ms: int, hard_ms: int | None = None, eval_brain: str = "MVP") -> None:
         self.start = time.perf_counter()
         self.soft_s = max(MIN_TIME_MS, int(soft_ms or 0)) / 1000
         self.hard_s = max(self.soft_s, int(hard_ms or 0) / 1000)
@@ -220,6 +218,7 @@ class Searcher:
         self.budget_s = self.soft_s
         self.deadline = self._abort_deadline()
         self.nodes = 0
+        self.eval_brain = eval_brain
         self.root_color = chess.WHITE
         self.contempt = 0
         # Root moves finished in the depth being searched, used if time runs out.
@@ -241,7 +240,7 @@ class Searcher:
             raise SearchTimeout
 
     def _evaluate(self, board: chess.Board) -> float:
-        return evaluate_board(board, BRAIN)
+        return evaluate_board(board, self.eval_brain)
 
     def _draw_score(self, board: chess.Board) -> float:
         # Seen from the side to move: a draw costs the root side `contempt`.
@@ -558,7 +557,12 @@ class Searcher:
         return best_score
 
 
-def find_best_move(board: chess.Board, soft_ms: int, hard_ms: int | None = None) -> chess.Move:
+def find_best_move(
+    board: chess.Board,
+    soft_ms: int,
+    hard_ms: int | None = None,
+    eval_brain: str = "MVP",
+) -> chess.Move:
     """Return the best move found, aiming for ``soft_ms`` and never past ``hard_ms``.
 
     The search runs on a copy, so ``board`` is never modified. If time runs out,
@@ -566,4 +570,4 @@ def find_best_move(board: chess.Board, soft_ms: int, hard_ms: int | None = None)
     """
     if not any(board.legal_moves):
         raise ValueError("No legal moves in this position")
-    return Searcher(soft_ms, hard_ms).search(board.copy())
+    return Searcher(soft_ms, hard_ms, eval_brain).search(board.copy())

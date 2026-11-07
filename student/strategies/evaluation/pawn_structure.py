@@ -37,7 +37,7 @@ FILE_MASKS: list[int] = [0] * 8
 for f in range(8):
     mask = 0
     for r in range(8):
-        mask |= 1 << (r * 8 + f)
+        mask |= 1 << (r * 8 + f)    # Bật bit 1 ở các ô: r=0..7 trên cùng cột f
     FILE_MASKS[f] = mask
 
 # Mặt nạ 2 cột liền kề (Adjacent files) dùng để kiểm tra Tốt cô lập
@@ -81,8 +81,8 @@ _MAX_CACHE_SIZE = 16384
 
 
 def _eval_side_pawns(
-    friendly_pawns: int,
-    enemy_pawns: int,
+    friendly_pawns: int,    #tốt ta
+    enemy_pawns: int,       # tốt địch 
     is_white: bool,
 ) -> tuple[int, int]:
     """Đánh giá toàn bộ cấu trúc tốt của một phe bằng phép toán Bitboard."""

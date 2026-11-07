@@ -10,8 +10,6 @@ import chess
 
 from ...evaluation import evaluate_board
 
-BRAIN = "MVP"
-
 MATE_SCORE = 100_000
 MATE_THRESHOLD = MATE_SCORE - 1_000
 DRAW_SCORE = 0
@@ -53,11 +51,12 @@ def sort_moves(board: chess.Board, moves: list[chess.Move]) -> list[chess.Move]:
 
 
 class Searcher:
-    def __init__(self, time_limit_ms: int) -> None:
+    def __init__(self, time_limit_ms: int, eval_brain: str) -> None:
         self.start = time.perf_counter()
         self.time_limit_s = max(MIN_TIME_MS, int(time_limit_ms or 0)) / 1000
         self.deadline = self.start + self.time_limit_s
         self.nodes = 0
+        self.eval_brain = eval_brain
 
     def elapsed(self) -> float:
         return time.perf_counter() - self.start
@@ -124,7 +123,7 @@ class Searcher:
         if board.is_insufficient_material():
             return DRAW_SCORE
         if depth <= 0:
-            return evaluate_board(board, BRAIN)
+            return evaluate_board(board, self.eval_brain)
 
         best_score = -INFINITY
         for move in sort_moves(board, moves):
@@ -140,7 +139,11 @@ class Searcher:
         return best_score
 
 
-def find_best_move(board: chess.Board, time_limit_ms: int) -> chess.Move:
+def find_best_move(
+    board: chess.Board,
+    time_limit_ms: int,
+    eval_brain: str = "MVP",
+) -> chess.Move:
     """Return the best move found within ``time_limit_ms`` milliseconds.
 
     The search runs on a copy, so ``board`` is never modified. If time runs out,
@@ -148,4 +151,4 @@ def find_best_move(board: chess.Board, time_limit_ms: int) -> chess.Move:
     """
     if not any(board.legal_moves):
         raise ValueError("No legal moves in this position")
-    return Searcher(time_limit_ms).search(board.copy())
+    return Searcher(time_limit_ms, eval_brain).search(board.copy())
