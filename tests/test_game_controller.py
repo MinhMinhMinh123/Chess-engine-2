@@ -8,7 +8,35 @@ import chess
 import chess.pgn
 import pytest
 
+from app.bot_process import BotProcess, BotProcessError
 from app.game_controller import GameController
+
+
+def test_worker_start_failure_finishes_game_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fail_start(_: BotProcess) -> None:
+        raise BotProcessError("Worker exited with code 1")
+
+    monkeypatch.setattr(BotProcess, "start", fail_start)
+
+    async def scenario() -> None:
+        async def broadcast(_: dict[str, Any]) -> None:
+            return None
+
+        controller = GameController(broadcast)
+        await controller.start("black", 10, 518)
+
+        assert controller.status == "finished"
+        assert controller.result == "1-0"
+        assert controller.termination == (
+            "bot initialization: Worker exited with code 1"
+        )
+        assert controller.bot is None
+
+        await controller.close()
+
+    asyncio.run(scenario())
 
 
 def test_game_can_be_stopped_and_started_again() -> None:

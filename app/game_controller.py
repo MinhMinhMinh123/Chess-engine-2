@@ -53,9 +53,9 @@ class GameController:
             self.result = None
             self.termination = None
             self.bot = BotProcess()
-            await self.bot.start()
             started = time.monotonic_ns()
             try:
+                await self.bot.start()
                 await self.bot.request(
                     {
                         "type": "init",
