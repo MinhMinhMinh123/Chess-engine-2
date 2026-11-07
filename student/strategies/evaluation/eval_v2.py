@@ -13,7 +13,7 @@ from .pst import (
 )
 
 
-def evaluate_board(board: chess.Board) -> float:
+def evaluate_board(board: chess.Board) -> int:
     """Lượng giá thế cờ toàn diện kết hợp:
 
     1. Giá trị vật chất 2 giai đoạn (Trung cuộc & Tàn cuộc).
@@ -79,9 +79,9 @@ def evaluate_board(board: chess.Board) -> float:
     eg_score = (eg_white - eg_black) + pawn_eg_diff
 
     phase = min(game_phase, TOTAL_PHASE)
-    total_score = (mg_score * phase + eg_score * (TOTAL_PHASE - phase)) / TOTAL_PHASE
+    total_score = (mg_score * phase + eg_score * (TOTAL_PHASE - phase)) // TOTAL_PHASE
 
     # ==========================================================================
-    # 5. CHUẨN NEGAMAX: TRẢ VỀ THEO GÓC NHÌN BÊN ĐANG ĐI
+    # 5. CHUẨN NEGAMAX: TRẢ VỀ THEO GÓC NHÌN BÊN ĐANG ĐI (SỐ NGUYÊN)
     # ==========================================================================
-    return total_score if board.turn == chess.WHITE else -total_score
+    return int(total_score) if board.turn == chess.WHITE else int(-total_score)
