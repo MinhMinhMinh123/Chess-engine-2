@@ -1,6 +1,11 @@
 {
   "protocol_version": "1.0",
-  "team_id": "TODO",
-  "display_name": "TODO",
-  "members": []
+  "team_id": "nhom-08",
+  "display_name": "Nhóm 8",
+  "members": [
+    "25022942 - Nguyễn Anh Minh",
+    "25022948 - Nguyễn Tiến Minh",
+    "25022983 - Nguyễn Ngọc Phúc",
+    "25022995 - Nguyễn Đức Quân"
+  ]
 }
