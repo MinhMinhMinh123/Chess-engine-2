@@ -40,15 +40,16 @@ class BotProcess:
             return response
 
     async def _read(self, timeout: float) -> dict[str, Any]:
-        if self.process is None or self.process.stdout is None:
+        process = self.process
+        if process is None or process.stdout is None:
             raise BotProcessError("Worker is not running")
         try:
-            line = await asyncio.wait_for(self.process.stdout.readline(), timeout=timeout)
+            line = await asyncio.wait_for(process.stdout.readline(), timeout=timeout)
         except TimeoutError as exc:
             await self.stop()
             raise BotProcessError("Bot timed out") from exc
         if not line:
-            code = await self.process.wait()
+            code = await process.wait()
             raise BotProcessError(f"Worker exited with code {code}")
         return json.loads(line)
 
