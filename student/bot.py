@@ -2,7 +2,7 @@ import chess
 
 from chesslab_sdk import BotConfig, SearchContext
 from .search import find_best_move
-from .time_manager import allocate_time
+from .time_manager import allocate_time_window
 
 
 class StudentBot:
@@ -18,8 +18,8 @@ class StudentBot:
             raise ValueError("No legal moves in this position")
 
         try:
-            time_limit_ms = allocate_time(context)
-            move = find_best_move(board.copy(stack=True), time_limit_ms, self.brain)
+            soft_ms, hard_ms = allocate_time_window(context)
+            move = find_best_move(board.copy(stack=True), soft_ms, hard_ms, self.brain)
             if isinstance(move, chess.Move) and move in legal_moves:
                 return move
             raise ValueError(f"Search returned an illegal move: {move!r}")

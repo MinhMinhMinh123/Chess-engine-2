@@ -205,7 +205,9 @@ def evaluate_board(board: chess.Board) -> float:
             eg_score -= _mop_up_eval(winning_king=king_black, losing_king=king_white)
 
     # 8. NỘI SUY TAPERED THEO GIAI ĐOẠN VÁN CỜ
-    total_score = (mg_score * phase + eg_score * (TOTAL_PHASE - phase)) / TOTAL_PHASE
+    # Chia lấy nguyên (//) để điểm luôn là số nguyên: cửa sổ hẹp (alpha, alpha + 1)
+    # của PVS trong search chỉ đúng khi điểm là số nguyên.
+    total_score = int(mg_score * phase + eg_score * (TOTAL_PHASE - phase)) // TOTAL_PHASE
 
     # 9. CHUẨN NEGAMAX
     return total_score if board.turn == chess.WHITE else -total_score
